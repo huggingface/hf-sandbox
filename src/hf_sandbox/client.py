@@ -152,9 +152,11 @@ class Sandbox:
             f"{self.url}/exec",
             json={"cmd": list(cmd), "workdir": workdir, "stdin": stdin, "timeout": timeout},
             timeout=timeout + 10,
-        ).json()
+        )
+        r.raise_for_status()
+        body = r.json()
         return subprocess.CompletedProcess(
-            args=list(cmd), returncode=r["rc"], stdout=r["stdout"], stderr=r["stderr"],
+            args=list(cmd), returncode=body["rc"], stdout=body["stdout"], stderr=body["stderr"],
         )
 
     def write_file(self, path: str, content: str | bytes):
