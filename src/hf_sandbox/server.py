@@ -8,12 +8,13 @@ from pathlib import Path
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 
+# Must match `_PORT` in client.py.
+PORT = 8000
 app = FastAPI()
-TOKEN = os.environ["HF_SANDBOX_TOKEN"]
 
 
-def auth(authorization: str = Header(...)):
-    if authorization != f"Bearer {TOKEN}":
+def auth(x_sandbox_token: str = Header(...)):
+    if x_sandbox_token != os.environ["HF_SANDBOX_TOKEN"]:
         raise HTTPException(401)
 
 
@@ -38,10 +39,7 @@ def exec_(req: dict, _=Depends(auth)):
 
 @app.post("/write")
 def write(req: dict, _=Depends(auth)):
-    if "content_b64" in req:
-        Path(req["path"]).write_bytes(base64.b64decode(req["content_b64"]))
-    else:
-        Path(req["path"]).write_text(req["content"])
+    Path(req["path"]).write_bytes(base64.b64decode(req["content_b64"]))
     return {"ok": True}
 
 
@@ -59,4 +57,4 @@ def health():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

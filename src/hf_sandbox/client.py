@@ -2,18 +2,20 @@
 
 import atexit
 import base64
-import re
+import functools
 import secrets
-import socket
 import subprocess
 import time
 import uuid
 from pathlib import Path
 
-import dns.resolver
 import httpx
-from huggingface_hub import cancel_job, fetch_job_logs, get_token, run_job
+from huggingface_hub import cancel_job, get_token, run_job
 from huggingface_hub.utils import send_telemetry
+
+# Must match `PORT` in server.py (the server runs in a separate process inside
+# the job and cannot import from this module).
+_PORT = 8000
 
 _active: set["Sandbox"] = set()
 
@@ -39,60 +41,36 @@ def _telemetry(topic: str, data: dict) -> None:
     except Exception:
         pass
 
-# Some local resolvers (e.g. systemd-resolved) return NXDOMAIN for fresh
-# trycloudflare.com subdomains even though public DNS resolves them fine.
-# We bypass the system resolver by looking up via 1.1.1.1 and overriding
-# socket.getaddrinfo for hosts we explicitly register.
-_HOST_OVERRIDES: dict[str, str] = {}
-_orig_getaddrinfo = socket.getaddrinfo
 
-
-def _patched_getaddrinfo(host, *args, **kwargs):
-    if host in _HOST_OVERRIDES:
-        return _orig_getaddrinfo(_HOST_OVERRIDES[host], *args, **kwargs)
-    return _orig_getaddrinfo(host, *args, **kwargs)
-
-
-socket.getaddrinfo = _patched_getaddrinfo
-
-
-def _register_public_dns_override(hostname: str, timeout: float = 120) -> None:
-    resolver = dns.resolver.Resolver(configure=False)
-    resolver.nameservers = ["1.1.1.1", "8.8.8.8"]
-    resolver.timeout = 5
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            _HOST_OVERRIDES[hostname] = str(resolver.resolve(hostname, "A")[0])
-            return
-        except dns.resolver.NXDOMAIN:
-            time.sleep(2)
-    raise TimeoutError(f"DNS for {hostname} never propagated within {timeout}s")
-
-_SERVER_SRC = (Path(__file__).parent / "server.py").read_text()
-_CLOUDFLARED_VERSION = "2026.3.0"
 _FASTAPI_VERSION = "0.115.0"
 _UVICORN_VERSION = "0.30.6"
 
-_BOOTSTRAP = f"""set -e
-pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
-python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/cloudflare/cloudflared/releases/download/{_CLOUDFLARED_VERSION}/cloudflared-linux-amd64', '/tmp/cf')"
-chmod +x /tmp/cf
-cat > /tmp/server.py << 'PYEOF'
-{_SERVER_SRC}
-PYEOF
-python -u /tmp/server.py &
-exec /tmp/cf tunnel --url http://localhost:8000 --no-autoupdate 2>&1
-"""
 
-_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+@functools.cache
+def _bootstrap() -> str:
+    server_src = (Path(__file__).parent / "server.py").read_text()
+    return f"""set -e
+pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
+cat > /tmp/server.py << 'PYEOF'
+{server_src}
+PYEOF
+exec python -u /tmp/server.py
+"""
 
 
 class Sandbox:
-    def __init__(self, job_id: str, url: str, token: str):
+    def __init__(self, job_id: str, url: str, sandbox_token: str, hf_token: str):
         self.job_id = job_id
         self.url = url
-        self._http = httpx.Client(headers={"Authorization": f"Bearer {token}"})
+        # `Authorization` is consumed by the jobs proxy (HF token + namespace
+        # gate). `X-Sandbox-Token` is forwarded to the in-pod RPC server and
+        # gates the actual exec/read/write endpoints.
+        self._http = httpx.Client(
+            headers={
+                "Authorization": f"Bearer {hf_token}",
+                "X-Sandbox-Token": sandbox_token,
+            },
+        )
         self._session_id = uuid.uuid4().hex
         self._started_at = time.time()
         self._terminated = False
@@ -100,20 +78,25 @@ class Sandbox:
     @classmethod
     def create(cls, image: str, flavor: str = "cpu-basic", timeout: str = "1h",
                forward_hf_token: bool = False):
-        token = secrets.token_urlsafe(32)
-        job_secrets = {"HF_SANDBOX_TOKEN": token}
+        hf_token = get_token()
+        if hf_token is None:
+            raise RuntimeError("No HF token found. Run `hf auth login` first.")
+        sandbox_token = secrets.token_urlsafe(32)
+        job_secrets = {"HF_SANDBOX_TOKEN": sandbox_token}
         if forward_hf_token:
-            job_secrets["HF_TOKEN"] = get_token()
+            job_secrets["HF_TOKEN"] = hf_token
         job = run_job(
             image=image,
-            command=["bash", "-c", _BOOTSTRAP],
+            command=["bash", "-c", _bootstrap()],
             secrets=job_secrets,
             flavor=flavor,
             timeout=timeout,
+            expose=[_PORT],
         )
-        url = cls._wait_for_url(job.id)
-        _register_public_dns_override(url.split("://", 1)[1].split("/", 1)[0])
-        sb = cls(job.id, url, token)
+        # TODO: read from `job.status.expose_urls` once huggingface_hub
+        # surfaces it on `JobInfo` (the hub already returns the field).
+        url = f"https://{job.id}--{_PORT}.hf.jobs"
+        sb = cls(job.id, url, sandbox_token, hf_token)
         sb._wait_healthy()
         _active.add(sb)
         _telemetry("create", {
@@ -124,26 +107,19 @@ class Sandbox:
         })
         return sb
 
-    @staticmethod
-    def _wait_for_url(job_id: str, timeout: float = 300) -> str:
+    def _wait_healthy(self, timeout: float = 300):
+        # Job has to schedule a pod, run `pip install`, then start uvicorn
+        # before the proxy can route — typical cold start is 30-90s, so
+        # idle for the first 15s before probing.
         deadline = time.time() + timeout
-        for line in fetch_job_logs(job_id=job_id, follow=True):
-            m = _URL_RE.search(line)
-            if m:
-                return m.group(0)
-            if time.time() > deadline:
-                break
-        raise TimeoutError(f"tunnel URL never appeared in logs for job {job_id}")
-
-    def _wait_healthy(self, timeout: float = 60):
-        deadline = time.time() + timeout
+        time.sleep(min(15, timeout))
         while time.time() < deadline:
             try:
-                if self._http.get(f"{self.url}/health", timeout=5).status_code == 200:
+                if self._http.get(f"{self.url}/health", timeout=3).status_code == 200:
                     return
             except httpx.HTTPError:
                 pass
-            time.sleep(1)
+            time.sleep(3)
         raise TimeoutError(f"sandbox at {self.url} never became healthy")
 
     def exec(self, *cmd: str, workdir: str | None = None, stdin: str | None = None,
@@ -160,11 +136,12 @@ class Sandbox:
         )
 
     def write_file(self, path: str, content: str | bytes):
-        if isinstance(content, bytes):
-            payload = {"path": path, "content_b64": base64.b64encode(content).decode()}
-        else:
-            payload = {"path": path, "content": content}
-        r = self._http.post(f"{self.url}/write", json=payload)
+        if isinstance(content, str):
+            content = content.encode()
+        r = self._http.post(
+            f"{self.url}/write",
+            json={"path": path, "content_b64": base64.b64encode(content).decode()},
+        )
         r.raise_for_status()
 
     def read_file(self, path: str, text: bool = True) -> str | bytes:

@@ -21,9 +21,9 @@ sb.terminate()
 
 1. `pip install`s a tiny FastAPI RPC server (FastAPI + uvicorn)
 2. starts the server on `localhost:8000`
-3. opens a free [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) so the master process can reach it
+3. declares port 8000 as exposed on the Job (`expose=[8000]`), so the HF Jobs proxy registers `https://<job_id>--8000.hf.jobs`
 
-The client polls the job logs for the tunnel URL, then talks to the sandbox over plain HTTPS.
+The client computes the URL from the Job id and talks to the sandbox over plain HTTPS through the Jobs proxy.
 
 `exec`, `write_file`, `read_file` are simple authenticated POSTs.
 `terminate()` cancels the job.
@@ -34,20 +34,19 @@ The client polls the job logs for the tunnel URL, then talks to the sandbox over
 pip install hf-sandbox
 ```
 
-Requires `hf auth login` (the same token is forwarded to the sandbox so it can access HF Hub).
+Requires `hf auth login` (the same token authenticates against the Jobs proxy and, opt-in, is forwarded to the sandbox so it can access HF Hub).
 
 ## Limits
 
-- Image must have Python + `pip` (used to install the RPC server and download `cloudflared`).
-- Cloudflare's free `trycloudflare.com` URLs are best-effort — fine for benchmarks, not production.
+- Image must have Python + `pip` (used to install the RPC server).
 
 ## Security
 
 The sandbox runs **untrusted code by design**. A few things to be aware of:
 
 - **HF token forwarding is opt-in.** By default, your HF token is *not* exposed to the sandbox. Pass `forward_hf_token=True` to `Sandbox.create()` if your workload needs it. With it enabled, anything running inside the sandbox can read the token from `/proc/self/environ` and use it to act as you on the Hub.
-- **Cloudflare sees all tunnel traffic.** Requests, responses, and the auth token transit Cloudflare's infrastructure (via `trycloudflare.com`). They state they don't log it, but it's a trust relationship. Don't run sensitive workloads through it.
-- **Auth token** is a 256-bit random URL-safe string per sandbox, sent as `Bearer` on every authenticated endpoint. The tunnel URL alone gets you nothing.
+- **Traffic stays on Hugging Face infrastructure.** Requests reach the sandbox through the HF Jobs proxy and require an HF token with read access to the job's namespace; the sandbox URL alone (`https://<job_id>--8000.hf.jobs`) is unauthenticated and returns 401.
+- **Sandbox token** is a 256-bit random URL-safe string per sandbox, sent as `X-Sandbox-Token` on every authenticated endpoint and validated by the in-pod RPC server. Defends against namespace-mates being able to reach your sandbox once they pass the proxy.
 
 ## Telemetry
 
