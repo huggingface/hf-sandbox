@@ -49,7 +49,7 @@ _UVICORN_VERSION = "0.30.6"
 _ENSURE_PYTHON = """\
 if ! command -v python3 > /dev/null 2>&1 && ! command -v python > /dev/null 2>&1; then
     if command -v apt-get > /dev/null 2>&1; then
-        apt-get install -y -q python3 python3-pip
+        apt-get update -qq && apt-get install -y -q python3 python3-pip
     elif command -v apk > /dev/null 2>&1; then
         apk add --no-cache python3 py3-pip
     elif command -v yum > /dev/null 2>&1; then
