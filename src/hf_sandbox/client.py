@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 import httpx
-from huggingface_hub import cancel_job, get_token, run_job
+from huggingface_hub import cancel_job, get_token, inspect_job, run_job
 from huggingface_hub.utils import send_telemetry
 
 # Must match `PORT` in server.py (the server runs in a separate process inside
@@ -46,15 +46,53 @@ _FASTAPI_VERSION = "0.115.0"
 _UVICORN_VERSION = "0.30.6"
 
 
+_ENSURE_PYTHON = """\
+if ! command -v python3 > /dev/null 2>&1 && ! command -v python > /dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -q python3 python3-pip
+    elif command -v apk > /dev/null 2>&1; then
+        apk add --no-cache python3 py3-pip
+    elif command -v yum > /dev/null 2>&1; then
+        yum install -y -q python3 pip3
+    elif command -v dnf > /dev/null 2>&1; then
+        dnf install -y -q python3 pip3
+    else
+        echo "hf-sandbox: cannot install Python — no supported package manager found" >&2
+        exit 1
+    fi
+fi
+PYTHON=$(command -v python3 || command -v python)
+if ! $PYTHON -m pip --version > /dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -q python3-pip
+    elif command -v apk > /dev/null 2>&1; then
+        apk add --no-cache py3-pip
+    elif command -v yum > /dev/null 2>&1; then
+        yum install -y -q pip3
+    elif command -v dnf > /dev/null 2>&1; then
+        dnf install -y -q pip3
+    else
+        echo "hf-sandbox: cannot install pip — no supported package manager found" >&2
+        exit 1
+    fi
+fi
+"""
+
+
 @functools.cache
 def _bootstrap() -> str:
     server_src = (Path(__file__).parent / "server.py").read_text()
     return f"""set -e
-pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
+{_ENSURE_PYTHON}
+PIP_FLAGS="--ignore-installed"
+if $PYTHON -m pip install --help 2>&1 | grep -q break-system-packages; then
+    PIP_FLAGS="$PIP_FLAGS --break-system-packages"
+fi
+$PYTHON -m pip install -q $PIP_FLAGS fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
 cat > /tmp/server.py << 'PYEOF'
 {server_src}
 PYEOF
-exec python -u /tmp/server.py
+exec $PYTHON -u /tmp/server.py
 """
 
 
@@ -107,6 +145,8 @@ class Sandbox:
         })
         return sb
 
+    _TERMINAL_STAGES = {"ERROR", "CANCELED", "DELETED", "COMPLETED"}
+
     def _wait_healthy(self, timeout: float = 300):
         # Job has to schedule a pod, run `pip install`, then start uvicorn
         # before the proxy can route — typical cold start is 30-90s, so
@@ -114,6 +154,14 @@ class Sandbox:
         deadline = time.time() + timeout
         time.sleep(min(15, timeout))
         while time.time() < deadline:
+            job = inspect_job(job_id=self.job_id)
+            stage = str(getattr(job.status.stage, "value", job.status.stage))
+            if stage in self._TERMINAL_STAGES:
+                msg = getattr(job.status, "message", None) or stage
+                raise RuntimeError(
+                    f"Sandbox job {self.job_id} failed before becoming healthy "
+                    f"(stage={stage}): {msg}"
+                )
             try:
                 if self._http.get(f"{self.url}/health", timeout=3).status_code == 200:
                     return
