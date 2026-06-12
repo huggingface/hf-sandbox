@@ -46,15 +46,35 @@ _FASTAPI_VERSION = "0.115.0"
 _UVICORN_VERSION = "0.30.6"
 
 
+_ENSURE_PYTHON = """\
+if ! command -v python3 > /dev/null 2>&1 && ! command -v python > /dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get install -y -q python3 python3-pip
+    elif command -v apk > /dev/null 2>&1; then
+        apk add --no-cache python3 py3-pip
+    elif command -v yum > /dev/null 2>&1; then
+        yum install -y -q python3 pip3
+    elif command -v dnf > /dev/null 2>&1; then
+        dnf install -y -q python3 pip3
+    else
+        echo "hf-sandbox: cannot install Python — no supported package manager found" >&2
+        exit 1
+    fi
+fi
+PYTHON=$(command -v python3 || command -v python)
+"""
+
+
 @functools.cache
 def _bootstrap() -> str:
     server_src = (Path(__file__).parent / "server.py").read_text()
     return f"""set -e
-python -m pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
+{_ENSURE_PYTHON}
+$PYTHON -m pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
 cat > /tmp/server.py << 'PYEOF'
 {server_src}
 PYEOF
-exec python -u /tmp/server.py
+exec $PYTHON -u /tmp/server.py
 """
 
 
