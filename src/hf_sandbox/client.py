@@ -84,7 +84,11 @@ def _bootstrap() -> str:
     server_src = (Path(__file__).parent / "server.py").read_text()
     return f"""set -e
 {_ENSURE_PYTHON}
-$PYTHON -m pip install -q --break-system-packages --ignore-installed fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
+PIP_FLAGS="--ignore-installed"
+if $PYTHON -m pip install --help 2>&1 | grep -q break-system-packages; then
+    PIP_FLAGS="$PIP_FLAGS --break-system-packages"
+fi
+$PYTHON -m pip install -q $PIP_FLAGS fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
 cat > /tmp/server.py << 'PYEOF'
 {server_src}
 PYEOF
