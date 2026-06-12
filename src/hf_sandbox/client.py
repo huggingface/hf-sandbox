@@ -62,6 +62,20 @@ if ! command -v python3 > /dev/null 2>&1 && ! command -v python > /dev/null 2>&1
     fi
 fi
 PYTHON=$(command -v python3 || command -v python)
+if ! $PYTHON -m pip --version > /dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -q python3-pip
+    elif command -v apk > /dev/null 2>&1; then
+        apk add --no-cache py3-pip
+    elif command -v yum > /dev/null 2>&1; then
+        yum install -y -q pip3
+    elif command -v dnf > /dev/null 2>&1; then
+        dnf install -y -q pip3
+    else
+        echo "hf-sandbox: cannot install pip — no supported package manager found" >&2
+        exit 1
+    fi
+fi
 """
 
 
