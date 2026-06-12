@@ -136,7 +136,7 @@ class Sandbox:
         deadline = time.time() + timeout
         time.sleep(min(15, timeout))
         while time.time() < deadline:
-            job = inspect_job(self.job_id)
+            job = inspect_job(job_id=self.job_id)
             if job.status.stage in self._TERMINAL_STAGES:
                 msg = getattr(job.status, "message", None) or job.status.stage.value
                 raise RuntimeError(
