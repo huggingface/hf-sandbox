@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 import httpx
-from huggingface_hub import cancel_job, get_token, run_job
+from huggingface_hub import JobStage, cancel_job, get_token, inspect_job, run_job
 from huggingface_hub.utils import send_telemetry
 
 # Must match `PORT` in server.py (the server runs in a separate process inside
@@ -50,7 +50,7 @@ _UVICORN_VERSION = "0.30.6"
 def _bootstrap() -> str:
     server_src = (Path(__file__).parent / "server.py").read_text()
     return f"""set -e
-pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
+python -m pip install -q fastapi=={_FASTAPI_VERSION} uvicorn=={_UVICORN_VERSION}
 cat > /tmp/server.py << 'PYEOF'
 {server_src}
 PYEOF
@@ -107,6 +107,8 @@ class Sandbox:
         })
         return sb
 
+    _TERMINAL_STAGES = {JobStage.ERROR, JobStage.CANCELED, JobStage.DELETED, JobStage.COMPLETED}
+
     def _wait_healthy(self, timeout: float = 300):
         # Job has to schedule a pod, run `pip install`, then start uvicorn
         # before the proxy can route — typical cold start is 30-90s, so
@@ -114,6 +116,13 @@ class Sandbox:
         deadline = time.time() + timeout
         time.sleep(min(15, timeout))
         while time.time() < deadline:
+            job = inspect_job(self.job_id)
+            if job.status.stage in self._TERMINAL_STAGES:
+                msg = getattr(job.status, "message", None) or job.status.stage.value
+                raise RuntimeError(
+                    f"Sandbox job {self.job_id} failed before becoming healthy "
+                    f"(stage={job.status.stage.value}): {msg}"
+                )
             try:
                 if self._http.get(f"{self.url}/health", timeout=3).status_code == 200:
                     return
