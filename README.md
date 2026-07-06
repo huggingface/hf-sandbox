@@ -5,6 +5,30 @@
 
 Modal-style sandbox API on top of Hugging Face Jobs.
 
+> [!IMPORTANT]
+> **`hf-sandbox` is moving into `huggingface_hub`.**
+>
+> This prototype is being upstreamed as a first-class `Sandbox` API (plus an `hf sandbox` CLI). It ships in `huggingface_hub` 1.22.0 (`pip install "huggingface_hub>=1.22.0"`). Use:
+>
+> ```python
+> from huggingface_hub import Sandbox
+>
+> with Sandbox.create(image="python:3.12") as sbx:
+>     sbx.files.write("/app/main.py", "print(40 + 2)")
+>     print(sbx.run("python /app/main.py").stdout)    # 42
+> ```
+>
+> Or from the CLI:
+>
+> ```bash
+> id=$(hf sandbox create)
+> hf sandbox exec $id -- python -c "print(40 + 2)"   # 42
+> hf sandbox cp data.csv $id:/data/data.csv
+> hf sandbox kill $id
+> ```
+>
+> This repo will be archived in favor of that.
+
 ```python
 from hf_sandbox import Sandbox
 
